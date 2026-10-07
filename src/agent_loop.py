@@ -1069,6 +1069,33 @@ def _explicitly_named_personal_tools(text: str) -> Set[str]:
     }
 
 
+def _explicitly_named_mcp_tools(text: str, mcp_schemas: Sequence[dict]) -> Set[str]:
+    """Return enabled MCP tools the user named outright.
+
+    Matches the qualified ``mcp__server__tool`` name, or the bare tool name when
+    it is snake_case (``get_server_time``) so plain words like ``search`` don't
+    pull in every MCP server's search tool.
+    """
+    value = str(text or "")
+    if not value or not mcp_schemas:
+        return set()
+
+    def named(token: str) -> bool:
+        return bool(re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", value, re.IGNORECASE
+        ))
+
+    found: Set[str] = set()
+    for schema in mcp_schemas:
+        qualified = str((schema.get("function") or {}).get("name") or "")
+        if not qualified.startswith("mcp__"):
+            continue
+        short = qualified.split("__", 2)[-1]
+        if named(qualified) or ("_" in short and named(short)):
+            found.add(qualified)
+    return found
+
+
 def _qwen38_router_tool_names(query: str) -> Set[str]:
     q = (query or "").lower()
     selected: Set[str] = set()
@@ -23267,6 +23294,31 @@ async def stream_agent_loop(
             logger.info(
                 "[agent-intent] preserved explicitly named personal tools=%s",
                 sorted(_explicit_personal_tools),
+            )
+    # Same for MCP tools: retrieval returns a top-k subset, so "Call
+    # get_server_time" could leave that tool out and the model would honestly
+    # report it unavailable. mcp_mgr is already None for blocked owners and
+    # _mcp_disabled_map carries user toggles and plan-mode filtering.
+    if not guide_only and mcp_mgr:
+        try:
+            _named_mcp_tools = _explicitly_named_mcp_tools(
+                _retrieval_query or _last_user,
+                _filter_raw_browser_mcp_schemas(
+                    mcp_mgr.get_all_openai_schemas(_mcp_disabled_map),
+                    disabled_tools,
+                ),
+            ) - set(disabled_tools) - set(_caller_disabled_tools)
+        except Exception as exc:
+            logger.debug("explicit MCP tool lookup failed: %s", exc)
+            _named_mcp_tools = set()
+        # None means "no narrowing"; only widen an actual subset.
+        if _named_mcp_tools and _relevant_tools is not None:
+            _relevant_tools.update(_named_mcp_tools)
+            if _base_relevant_tools is not None:
+                _base_relevant_tools.update(_named_mcp_tools)
+            logger.info(
+                "[agent-intent] preserved explicitly named MCP tools=%s",
+                sorted(_named_mcp_tools),
             )
     _local_media_turn = bool(
         workspace and _native_local_media_inputs(_last_user, client_runtime_context)

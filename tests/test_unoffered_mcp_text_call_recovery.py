@@ -128,3 +128,71 @@ def test_resolve_tool_blocks_recovers_only_listed_unoffered_names():
         recover_unoffered_tool_names=None,
     )
     assert blocks == []
+
+
+# ---------------------------------------------------------------------------
+# Explicitly named MCP tools are offered even when retrieval misses them.
+# "Call get_server_time" on Qwen3 answered "get_server_time is not available"
+# because top-k retrieval left the tool out of the native schemas.
+# ---------------------------------------------------------------------------
+SERVER_TIME = "mcp__srv__get_server_time"
+SERVER_SEARCH = "mcp__srv__search"
+
+
+def test_explicitly_named_mcp_tools_matches_short_and_qualified_names():
+    schemas = [_schema(SERVER_TIME), _schema(SERVER_SEARCH), _schema(LXD_POOLS)]
+    assert al._explicitly_named_mcp_tools("Call get_server_time.", schemas) == {SERVER_TIME}
+    assert al._explicitly_named_mcp_tools(f"run {LXD_POOLS} now", schemas) == {LXD_POOLS}
+    # Plain words never pull in a tool; neither do partial snake_case names.
+    assert al._explicitly_named_mcp_tools("search the web for the server time", schemas) == set()
+    assert al._explicitly_named_mcp_tools("get_server_times please", schemas) == set()
+    # Only names present in the (already filtered) schema list can match.
+    assert al._explicitly_named_mcp_tools("Call get_server_time", [_schema(SERVER_SEARCH)]) == set()
+
+
+def test_native_route_offers_and_runs_explicitly_named_mcp_tool(monkeypatch):
+    exec_calls = []
+    sent_tools = []
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(
+        al, "get_mcp_manager", lambda: _FakeMcpManager([SERVER_TIME, LXD_POOLS]), raising=False
+    )
+    monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    monkeypatch.setattr(
+        al.ToolRunSecurityContext,
+        "decision_for",
+        lambda self, *a, **k: ToolGateDecision(True),
+        raising=False,
+    )
+
+    async def _fake_exec(block, *a, **k):
+        exec_calls.append(block)
+        return (block.tool_type, {"output": "2026-10-08T01:22:00Z", "exit_code": 0})
+    monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
+
+    call_count = {"n": 0}
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        call_count["n"] += 1
+        sent_tools.append({
+            (t.get("function") or {}).get("name") for t in (kwargs.get("tools") or [])
+        })
+        if call_count["n"] == 1 and SERVER_TIME in sent_tools[-1]:
+            calls = [{"name": SERVER_TIME, "arguments": "{}"}]
+            yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
+        else:
+            yield f'data: {json.dumps({"delta": "2026-10-08T01:22:00Z"})}\n\n'
+        yield "data: [DONE]\n\n"
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    _collect(al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o",
+        [{"role": "user", "content": "Call get_server_time. Return only the actual tool result."}],
+        max_rounds=2,
+        relevant_tools={"web_search"},
+        owner="admin",
+    ))
+    assert SERVER_TIME in sent_tools[0]
+    assert LXD_POOLS not in sent_tools[0]
+    assert [b.tool_type for b in exec_calls] == [SERVER_TIME]

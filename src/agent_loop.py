@@ -27578,6 +27578,17 @@ async def stream_agent_loop(
             _recover_unoffered_local_tools.update({
                 "get_workspace", "ls", "read_file", "grep", "glob", "find",
             })
+        elif turn_contract is None and not guide_only and mcp_schemas:
+            # Native routes only send the retrieval-selected subset of MCP
+            # schemas, but the model may still know (e.g. from history) and
+            # write out an enabled MCP tool as text. A textual route would run
+            # that call, so don't silently drop it on a native route either.
+            # mcp_schemas already excludes disabled tools for this route.
+            _recover_unoffered_local_tools = {
+                name
+                for schema in mcp_schemas
+                if (name := (schema.get("function") or {}).get("name"))
+            }
         tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
             _normalized_doc_round,
             native_tool_calls,

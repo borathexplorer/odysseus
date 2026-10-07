@@ -1556,8 +1556,10 @@ def _build_chatgpt_responses_payload(
         "stream": stream,
         "store": False,
     }
-    if not _restricts_temperature(model):
-        payload["temperature"] = temperature
+    # ChatGPT Subscription Codex API does not support temperature on any model
+    # (gpt-6-* returns HTTP 400 "Unsupported parameter: temperature"); the
+    # backend always uses its own default. Do not include it in the payload.
+    del temperature
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
@@ -1567,7 +1569,7 @@ def _build_chatgpt_responses_payload(
 
 
 CHATGPT_ALLOWED_PAYLOAD_KEYS = frozenset({
-    "model", "instructions", "input", "stream", "store", "temperature", "reasoning",
+    "model", "instructions", "input", "stream", "store", "reasoning",
 })
 
 
@@ -1636,7 +1638,7 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
     return f"{provider} returned HTTP {status}" + (f": {detail}" if detail else "")
 
 # Models that require max_completion_tokens instead of max_tokens
-_MAX_COMPLETION_TOKENS_MODELS = {"o1", "o3", "o4", "gpt-4.5", "gpt-5"}
+_MAX_COMPLETION_TOKENS_MODELS = {"o1", "o3", "o4", "gpt-4.5", "gpt-5", "gpt-6"}
 
 def _uses_max_completion_tokens(model: str) -> bool:
     """Check if a model requires max_completion_tokens instead of max_tokens."""
@@ -1645,14 +1647,14 @@ def _uses_max_completion_tokens(model: str) -> bool:
     m = model.lower()
     return any(m.startswith(p) or f"/{p}" in m for p in _MAX_COMPLETION_TOKENS_MODELS)
 
-# OpenAI reasoning models (o1, o3, o4, gpt-5 families) only accept the default
+# OpenAI reasoning models (o1, o3, o4, gpt-5, gpt-6 families) only accept the default
 # temperature. Sending any explicit value — even 0.0 — returns HTTP 400
 # ("Only the default (1) value is supported"). That otherwise breaks chat when a
 # preset sets a non-default temperature, and makes endpoint probing report a
 # perfectly good model as failing. For these models we omit the field and let
 # the API use its required default. (gpt-4.5 is intentionally excluded — it is
 # not a reasoning model and accepts temperature normally.)
-_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5", "kimi-for-coding")
+_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5", "gpt-6", "kimi-for-coding")
 
 def _restricts_temperature(model: str) -> bool:
     """Check if a model rejects any non-default temperature."""

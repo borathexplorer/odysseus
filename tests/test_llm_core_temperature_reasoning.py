@@ -14,7 +14,7 @@ from src import llm_core
 @pytest.mark.parametrize(
     "model",
     ["o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-5-mini",
-     "openrouter/openai/o3-mini", "OpenAI/GPT-5", "kimi-for-coding"],
+     "gpt-6", "gpt-6-astra", "openrouter/openai/o3-mini", "OpenAI/GPT-5", "kimi-for-coding"],
 )
 def test_reasoning_models_restrict_temperature(model):
     assert llm_core._restricts_temperature(model) is True
@@ -156,3 +156,17 @@ def test_chatgpt_subscription_payload_omits_max_output_tokens_when_zero():
     )
 
     assert "max_output_tokens" not in payload
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.1-codex", "future-model"])
+def test_chatgpt_subscription_payload_omits_temperature(model):
+    # The Codex backend rejects temperature outright: HTTP 400
+    # "Unsupported parameter: temperature" (seen on gpt-6-astra).
+    payload = llm_core._build_chatgpt_responses_payload(
+        model,
+        [{"role": "user", "content": "heyo"}],
+        temperature=0.7,
+        max_tokens=4096,
+    )
+
+    assert "temperature" not in payload

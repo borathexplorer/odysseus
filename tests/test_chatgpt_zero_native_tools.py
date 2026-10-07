@@ -30,7 +30,7 @@ _MESSAGES = [
     {"role": "assistant", "content": "<tool>read_file</tool>"},
     {"role": "tool", "content": "README.md"},
 ]
-_ALLOWED_KEYS = {"model", "instructions", "input", "stream", "store", "temperature"}
+_ALLOWED_KEYS = {"model", "instructions", "input", "stream", "store"}
 
 
 def test_responses_payload_has_no_native_tool_surfaces():

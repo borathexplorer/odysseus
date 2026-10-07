@@ -6,6 +6,9 @@ from pathlib import Path
 
 import src.agent_loop as al
 
+# These tests drive the container runtime context themselves (tests/conftest.py).
+CONTAINER_RUNTIME_CONTEXT = True
+
 
 def test_terminal_agent_gets_larger_failed_tool_recovery_window():
     assert al._failed_tool_round_limit(None) == 2

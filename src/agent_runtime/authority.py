@@ -212,6 +212,17 @@ class RequestAuthority:
     def permits(self, operation):
         return not self.restricted(operation) and any(g.permits(operation) for g in self.grants)
 
+    def with_tools(self, names):
+        """Add whole-tool grants for server-enumerated names.
+
+        Used for the owner's enabled third-party MCP tools, which no request
+        family describes. Denials from restrict() still win over these grants.
+        """
+        granted = {g.tool for g in self.grants}
+        extra = tuple(OperationGrant(canonical_tool(n)) for n in sorted(set(names or ()))
+                      if canonical_tool(n) not in granted)
+        return replace(self, grants=self.grants + extra) if extra else self
+
     def restrict(self, policy=None, disabled_tools=()):
         policy = policy or ToolPolicy()
         return replace(self, denied=self.denied | frozenset(

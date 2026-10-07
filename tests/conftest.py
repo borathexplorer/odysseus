@@ -292,6 +292,36 @@ def _no_leaked_module_stubs():
 
 
 @pytest.fixture(autouse=True)
+def _no_host_container_runtime_context(request):
+    """Keep the agent's backend runtime context independent of the host.
+
+    When ``/.dockerenv`` exists the agent loop adds a container-only context
+    message to every model request. Running the suite inside Docker would then
+    change the prompts, message order and routing that many tests assert on,
+    so the message is suppressed by default.
+
+    Modules that test the container context itself opt out with a
+    module-level ``CONTAINER_RUNTIME_CONTEXT = True``.
+    """
+    if getattr(request.module, "CONTAINER_RUNTIME_CONTEXT", False):
+        yield
+        return
+    try:
+        from src import agent_loop
+    except Exception:
+        yield
+        return
+    # A private patcher keeps the shared ``monkeypatch`` fixture's teardown
+    # order unchanged for tests that check their own sys.modules hygiene.
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(agent_loop, "_backend_runtime_context_message", lambda: None)
+    try:
+        yield
+    finally:
+        patcher.undo()
+
+
+@pytest.fixture(autouse=True)
 def _no_context_window_network_probe(request):
     """Keep the turn context-window resolver offline in tests.
 

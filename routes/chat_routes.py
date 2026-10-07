@@ -3625,6 +3625,39 @@ def setup_chat_routes(
                 warm_tools=_warm_tools,
                 message=message, history=getattr(sess, "history", []) or [],
             )
+            # Third-party MCP tools belong to no request family, so the
+            # contract never offered them and authority never granted them.
+            # The owner installed and enabled these servers; offer and admit
+            # their tools on every turn that isn't narrowed to an exact
+            # operation. _contract_schemas only lists MCP tools when the owner
+            # isn't blocked, it isn't plan mode, MCP isn't disabled by policy,
+            # and the per-tool disabled map allows them.
+            _user_mcp_tools = frozenset(
+                name for s in _contract_schemas
+                if (name := s["function"]["name"]).startswith("mcp__")
+                and not name.startswith(("mcp__email__", "mcp__builtin_browser__"))
+            )
+            if (
+                _user_mcp_tools
+                and _selected_tools is None
+                and _turn_contract.required_read_operation is None
+                and not _turn_contract.unavailable
+            ):
+                _turn_contract = resolve_turn_contract(
+                    capabilities=_turn_capabilities, schemas=_contract_schemas,
+                    policy=_contract_policy, required_tools=_required_tools,
+                    required_capabilities=_active_turn_capabilities,
+                    selected_tools=_selected_tools,
+                    always_available_tools=(
+                        set(FAMILY_TOOLS["documents"] if active_doc else ()) | _user_mcp_tools
+                    ),
+                    warm_tools=_warm_tools,
+                    message=message, history=getattr(sess, "history", []) or [],
+                )
+                if exact_tool_approval is None:
+                    _request_authority = _request_authority.with_tools(
+                        _turn_contract.offered & _user_mcp_tools
+                    )
             _request_authority = _request_authority.restrict(_contract_policy)
             # Resolution already applies user, owner, and global policy. An
             # admitted tool must not later be rejected by the stale

@@ -589,7 +589,9 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.get("/notification-logs")
     async def get_notification_logs(request: Request, limit: int = 200):
         """Return persisted task notifications without consuming them."""
-        user = _owner(request)
+        from src.auth_helpers import require_user
+        from src.owner_identity import effective_storage_owner
+        user = effective_storage_owner(require_user(request))
         if not user:
             return {"notifications": []}
         limit = max(1, min(int(limit or 200), 1000))
@@ -617,7 +619,9 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.post("/notification-logs")
     async def create_notification_log(request: Request):
         """Persist an in-app toast so Settings can show notification history."""
-        user = _owner(request)
+        from src.auth_helpers import require_user
+        from src.owner_identity import effective_storage_owner
+        user = effective_storage_owner(require_user(request))
         if not user:
             raise HTTPException(401, "Authentication required")
         body = await request.json()

@@ -319,8 +319,9 @@ def test_plain_http_login_leaves_cookie_insecure_without_config(tmp_path, monkey
     assert _login_secure_flag(tmp_path, "http") is False
 
 
-def test_forwarded_proto_https_marks_cookie_secure(tmp_path, monkeypatch):
+def test_trusted_forwarded_proto_https_marks_cookie_secure(tmp_path, monkeypatch):
     monkeypatch.delenv("SECURE_COOKIES", raising=False)
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
 
     # A terminator that is not on an address uvicorn trusts leaves the
     # connection scheme as http, so the header is the only signal there.
@@ -355,9 +356,9 @@ def test_secure_cookies_true_forces_secure_on_plain_http(tmp_path, monkeypatch):
     assert _login_secure_flag(tmp_path, "http") is True
 
 
-def test_secure_cookies_false_forces_insecure_on_https(tmp_path, monkeypatch):
-    # The escape hatch for an install still answering on both HTTP and
-    # HTTPS: an explicit false wins over the request scheme.
+def test_secure_cookies_false_cannot_downgrade_https(tmp_path, monkeypatch):
+    # Preserve the private deployment policy: explicit false must not turn
+    # an HTTPS-issued bearer cookie into a cleartext-capable cookie.
     monkeypatch.setenv("SECURE_COOKIES", "false")
 
-    assert _login_secure_flag(tmp_path, "https") is False
+    assert _login_secure_flag(tmp_path, "https") is True

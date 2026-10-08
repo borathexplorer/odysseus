@@ -218,6 +218,27 @@
   .toggle { text-align: center; margin-top: calc(1rem + 4px); font-size: 0.85rem; color: color-mix(in srgb, var(--fg) 50%, transparent); }
   .toggle a { color: var(--red); cursor: pointer; text-decoration: none; }
   .toggle a:hover { text-decoration: underline; }
+  /* OIDC / SSO button */
+  .oidc-divider { display:flex; align-items:center; margin:1.15rem 0 1rem; }
+  .oidc-divider::before, .oidc-divider::after { content:''; flex:1; border-top:1px solid var(--border); }
+  .oidc-divider span { padding:0 0.75rem; color:color-mix(in srgb, var(--fg) 40%, transparent); font-size:0.75rem; text-transform:uppercase; }
+  .oidc-btn {
+    display: flex; align-items: center; gap: 0.75rem;
+    width: 100%; padding: 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--red) 40%, var(--border)); border-radius: 6px;
+    background: color-mix(in srgb, var(--red) 8%, var(--panel)); color: var(--fg);
+    font-size: 0.85rem; font-weight: 500; text-decoration: none; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .oidc-btn:hover { background: color-mix(in srgb, var(--red) 15%, var(--panel)); border-color: var(--red); }
+  .oidc-btn svg { flex-shrink: 0; }
+  .oidc-icon { display: flex; color: var(--red); }
+  .oidc-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 0.3rem; overflow-wrap: anywhere; }
+  .oidc-hint { font-size: 0.75rem; font-weight: 400; color: color-mix(in srgb, var(--fg) 60%, transparent); }
+  .oidc-arrow { color: color-mix(in srgb, var(--fg) 60%, transparent); }
+  .oidc-btn[aria-busy="true"] { opacity: 0.65; cursor: progress; }
+  .oidc-retry { margin-bottom: 1rem; }
+  #signInStatus:empty { display: none; }
   .pw-wrapper { position: relative; margin-bottom: 1rem; }
   .pw-wrapper input:not(.remember-check) { padding-right: 2.5rem; margin-bottom: 0; }
   .pw-toggle {
@@ -281,10 +302,21 @@
 
   <div class="error" id="error" role="alert" aria-live="assertive"></div>
 
-  <form id="authForm" autocomplete="on">
+  <p class="setup-note" id="signInStatus" role="status" aria-live="polite">Checking sign-in options…</p>
+  <button type="button" id="signInRetry" class="oidc-retry" style="display:none">Try again</button>
+  <div id="oidcSection" style="display:none">
+    <a class="oidc-btn" id="oidcBtn" href="api/auth/oidc/login">
+      <span class="oidc-icon"><svg id="oidcIcon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"></svg></span>
+      <span class="oidc-copy"><span id="oidcLabel">Sign in with SSO</span><span class="oidc-hint">Your organization’s secure sign-in</span></span>
+      <svg class="oidc-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+    </a>
+    <div id="oidcDivider" class="oidc-divider" aria-hidden="true"><span>or use a password</span></div>
+  </div>
+
+  <form id="authForm" method="post" action="api/auth/login" autocomplete="on" style="display:none">
     <label for="username">Username</label>
     <div class="pw-wrapper login-username-wrap">
-      <input id="username" name="username" type="text" required autofocus autocomplete="username">
+      <input id="username" name="username" type="text" required autocomplete="username">
       <label class="remember-toggle" id="rememberToggle" title="Remember me">
         <input type="checkbox" class="remember-check" id="remember" checked aria-label="Remember me">
         <span class="remember-dot" aria-hidden="true"></span>
@@ -320,24 +352,19 @@
 
 <footer class="version-label" id="version-label"></footer>
 
-<script nonce="{{CSP_NONCE}}">
+<script type="module" nonce="{{CSP_NONCE}}">
+import { renderSso } from "./static/js/loginSso.js";
 (async () => {
   const appUrl = window.__odysseusLoginAppUrl || ((path) => path);
-  // Load version
-  try {
-    const vr = await fetch(appUrl('/api/version'));
-    if (vr.ok) {
-      const vd = await vr.json();
-      document.getElementById('version-label').textContent = 'v' + (vd.build || vd.version);
-    }
-  } catch(e) {}
+  fetch(appUrl('/api/version')).then(r => r.ok ? r.json() : null).then(data => {
+    if (data) document.getElementById('version-label').textContent = 'v' + (data.build || data.version);
+  }).catch(() => {});
 
   // Prefill last username
   const usernameInput = document.getElementById('username');
   const savedUser = localStorage.getItem('odysseus-last-user');
   if (savedUser && usernameInput) {
     usernameInput.value = savedUser;
-    document.getElementById('password').focus();
   }
 
   const form = document.getElementById('authForm');
@@ -354,6 +381,8 @@
 
   let mode = 'login'; // 'login' | 'signup' | 'setup'
   let signupAllowed = false;
+  let passwordEnabled = false;
+  document.getElementById('signInRetry').addEventListener('click', () => window.location.reload());
   let policy = { password_min_length: 8, reserved_usernames: [] };
 
   function submitLabel() {
@@ -398,6 +427,21 @@
 
   const rememberToggle = document.getElementById('rememberToggle');
 
+  // Preserve a human-readable OIDC callback error until initial auth setup
+  // completes, since setMode() clears the error display.
+  const oidcErrorMessage = (() => {
+    const errCode = new URLSearchParams(window.location.search).get('error') || '';
+    const msgs = {
+      oidc_failed: 'Sign-in failed. Please try again.',
+      oidc_csrf: 'Security check failed. Please try signing in again.',
+      oidc_denied: 'Sign-in was cancelled.',
+      oidc_invalid: 'Invalid sign-in request.',
+      oidc_config: 'Single sign-on is temporarily unavailable. Try again shortly.',
+      oidc_claims: 'Your identity provider did not supply the required access information. Contact your administrator.',
+    };
+    return msgs[errCode] || (errCode.startsWith('oidc_') ? 'Sign-in error. Please try again.' : '');
+  })();
+
   function setMode(m) {
     mode = m;
     errEl.style.display = 'none';
@@ -427,37 +471,14 @@
     }
   }
 
-  // Check auth status and fetch policy in parallel, but don't block the
-  // authenticated redirect on the policy response.
-  const policyPromise = fetch(appUrl('/api/auth/policy'), { credentials: 'same-origin' }).catch(() => null);
-  try {
-    const statusRes = await fetch(appUrl('/api/auth/status'), { credentials: 'same-origin' });
-    const data = await statusRes.json();
-    if (data.authenticated) {
-      window.location.replace(appUrl('/'));
-      return;
-    }
-    signupAllowed = !!data.signup_enabled;
-    if (!data.configured) {
-      setMode('setup');
-    } else {
-      setMode('login');
-    }
-    const policyRes = await policyPromise;
-    if (policyRes && policyRes.ok) {
-      policy = await policyRes.json();
-    }
-  } catch (e) {
-    setMode('login');
-  }
-
   toggleLink.addEventListener('click', (e) => {
     e.preventDefault();
-    setMode(mode === 'login' ? 'signup' : 'login');
+    if (passwordEnabled) setMode(mode === 'login' ? 'signup' : 'login');
   });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (!passwordEnabled) return;
     errEl.style.display = 'none';
     submitBtn.disabled = true;
 
@@ -607,6 +628,56 @@
   }
   wireToggle('pwToggle', 'password');
   wireToggle('pwToggleConfirm', 'confirmPassword');
+  // Bind form handlers before revealing sign-in options or awaiting discovery.
+  // Check auth status and fetch policy in parallel, but don't block the
+  // authenticated redirect on the policy response.
+  const policyPromise = fetch(appUrl('/api/auth/policy'), { credentials: 'same-origin', signal: AbortSignal.timeout(15000) }).catch(() => null);
+  try {
+    const statusRes = await fetch(appUrl('/api/auth/status'), { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
+    if (!statusRes.ok) throw new Error('Sign-in options unavailable');
+    const data = await statusRes.json();
+    if (data.authenticated) {
+      window.location.replace(appUrl('/'));
+      return;
+    }
+    passwordEnabled = data.password_auth_enabled !== false;
+    signupAllowed = passwordEnabled && !!data.signup_enabled;
+    form.style.display = passwordEnabled ? 'block' : 'none';
+    if (!passwordEnabled) {
+      setupNote.textContent = 'Use your identity provider to sign in.';
+      setupNote.style.display = 'block';
+    } else if (!data.configured) {
+      setMode('setup');
+    } else {
+      setMode('login');
+    }
+    document.getElementById('signInStatus').textContent = '';
+    if (data.oidc_enabled) {
+      const config = await fetch(appUrl('/api/auth/oidc/config'), { signal: AbortSignal.timeout(20000) })
+        .then(r => r.ok ? r.json() : null).catch(() => null);
+      renderSso(config, passwordEnabled);
+    } else if (!passwordEnabled) {
+      renderSso(null, false);
+    }
+    if (passwordEnabled && !data.oidc_enabled) {
+      document.getElementById(savedUser ? 'password' : 'username').focus();
+    }
+    const policyRes = await policyPromise;
+    if (policyRes && policyRes.ok) {
+      policy = await policyRes.json();
+    }
+  } catch (e) {
+    form.style.display = 'none';
+    document.getElementById('signInStatus').textContent = 'Unable to load sign-in options. Please try again.';
+    document.getElementById('signInRetry').style.display = '';
+  }
+
+  if (oidcErrorMessage) {
+    errEl.textContent = oidcErrorMessage;
+    errEl.style.display = 'block';
+  }
+
+
 })();
 
 // Prevent login button and eye toggles from stealing focus on mobile (keeps keyboard open)

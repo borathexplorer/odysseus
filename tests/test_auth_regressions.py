@@ -79,6 +79,7 @@ def _auth_regressions_stubs(monkeypatch):
     auth = _ensure_stub(monkeypatch, "core.auth", AuthManager=MagicMock())
     ep = _ensure_stub(monkeypatch, "src.endpoint_resolver",
         resolve_endpoint=MagicMock(return_value=("", "", {})),
+        resolve_owner_registered_endpoint_url=MagicMock(),
         normalize_base=MagicMock(),
         build_chat_url=MagicMock(),
         build_models_url=MagicMock(),

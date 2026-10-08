@@ -70,3 +70,15 @@ def test_main_loads_admin_password_from_env_file(tmp_path, monkeypatch):
     assert bcrypt.checkpw(
         b"fromenvfile12345", data["users"]["presetuser"]["password_hash"].encode()
     ), "admin password from .env was ignored; a random one was generated"
+
+
+def test_oidc_only_setup_does_not_create_password_account(tmp_path, monkeypatch):
+    setup_module = _load_setup_module()
+    auth_path = tmp_path / "auth.json"
+    monkeypatch.setattr(setup_module, "AUTH_FILE", str(auth_path))
+    for key, value in {"PASSWORD_AUTH_ENABLED": "false", "AUTH_ENABLED": "true",
+                       "OIDC_ENABLED": "true", "OIDC_ISSUER": "https://idp.example.com",
+                       "OIDC_CLIENT_ID": "test", "OIDC_CLIENT_SECRET": "test-only"}.items():
+        monkeypatch.setenv(key, value)
+    assert setup_module.create_default_admin() == "oidc"
+    assert not auth_path.exists()

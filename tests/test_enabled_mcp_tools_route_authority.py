@@ -125,3 +125,53 @@ def test_with_tools_grants_but_restrict_still_denies():
     assert not _admits(no_mcp, SERVER_TIME)
     assert _admits(no_mcp, "ask_user")
     assert authority.with_tools(()) is authority
+
+
+@pytest.fixture
+def connected_mcp_server(user_mcp_server):
+    from src.agent_runtime.remote_resources import configuration_incarnation, endpoint_identity
+
+    url = "https://mcp.example/mcp"
+    user_mcp_server._resource_endpoints["srv"] = (
+        endpoint_identity(url), configuration_incarnation(("http", url, None, None, None)))
+    user_mcp_server._sessions["srv"] = object()
+    user_mcp_server._register_resource_connection("srv", user_mcp_server._sessions["srv"])
+    return user_mcp_server
+
+
+def _bind(authority, tool):
+    from src.agent_runtime.remote_resources import bind_backend_for_operation
+
+    return bind_backend_for_operation(authority, ExactOperation.normalize(tool, "{}"))
+
+
+def test_granted_mcp_tool_binds_its_connected_backend(connected_mcp_server):
+    from src.agent_runtime.resources import ExternalResource
+    from src.agent_runtime.remote_resources import ResourceIdentityError
+
+    base = RequestAuthority("id", "admin", "s", "", (OperationGrant("ask_user"),))
+    # A grant alone used to leave the backend unsealed, so every call failed
+    # with "External backend is outside sealed request scope".
+    with pytest.raises(ResourceIdentityError):
+        _bind(base, SERVER_TIME)
+    granted = base.with_tools({SERVER_TIME, LIST_INSTANCES})
+    bound = _bind(granted, SERVER_TIME)
+    assert isinstance(bound.resource, ExternalResource)
+    assert bound.resource.to_dict() == connected_mcp_server.resource_identity(SERVER_TIME).to_dict()
+    assert isinstance(_bind(granted, LIST_INSTANCES).resource, ExternalResource)
+    # Tools that were not granted keep no sealed backend of their own.
+    with pytest.raises(ResourceIdentityError):
+        _bind(granted, DELETE_INSTANCE)
+
+
+def test_with_tools_seals_nothing_for_unconnected_servers(user_mcp_server):
+    base = RequestAuthority("id", "admin", "s", "", (OperationGrant("ask_user"),))
+    granted = base.with_tools({SERVER_TIME})
+    assert granted.backend_resources == base.backend_resources
+    assert _admits(granted, SERVER_TIME)
+
+
+@pytest.mark.asyncio
+async def test_route_authority_binds_enabled_mcp_backend(monkeypatch, connected_mcp_server):
+    _contract, authority = await _route_turn(monkeypatch, "Call get_server_time.")
+    assert _bind(authority, SERVER_TIME).resource.namespace == "mcp"

@@ -217,11 +217,22 @@ class RequestAuthority:
 
         Used for the owner's enabled third-party MCP tools, which no request
         family describes. Denials from restrict() still win over these grants.
+        Their current MCP connections are sealed as the request's backends too;
+        a grant without its backend is refused at execution ("outside sealed
+        request scope").
         """
+        from src.agent_runtime.remote_resources import seal_backends
+
+        names = sorted(set(names or ()))
         granted = {g.tool for g in self.grants}
-        extra = tuple(OperationGrant(canonical_tool(n)) for n in sorted(set(names or ()))
+        extra = tuple(OperationGrant(canonical_tool(n)) for n in names
                       if canonical_tool(n) not in granted)
-        return replace(self, grants=self.grants + extra) if extra else self
+        backends = tuple(r for r in seal_backends(names, owner=self.owner)
+                         if r not in self.backend_resources)
+        if not extra and not backends:
+            return self
+        return replace(self, grants=self.grants + extra,
+                       backend_resources=self.backend_resources + backends)
 
     def restrict(self, policy=None, disabled_tools=()):
         policy = policy or ToolPolicy()

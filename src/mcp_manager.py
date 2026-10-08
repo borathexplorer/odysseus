@@ -412,6 +412,7 @@ class McpManager:
                     "name": tool.name,
                     "description": tool.description or "",
                     "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    "annotations": getattr(tool, "annotations", None),
                 })
 
             self._sessions[server_id] = session
@@ -561,6 +562,23 @@ class McpManager:
         if endpoint:
             self._resource_connections[server_id] = (endpoint, uuid4().hex, session,
                                                      self._resource_owners.get(server_id, ""))
+
+    def declares_read_only(self, qualified_name: str) -> bool:
+        """True only when the server explicitly marks the tool read-only.
+
+        Unlike mcp_tool_is_readonly() (plan mode), no name heuristic: this
+        relaxes the approval gate, so it must rest on the server's own claim.
+        """
+        parts = qualified_name.split("__", 2)
+        if len(parts) != 3 or parts[0] != "mcp":
+            return False
+        for tool in self._tools.get(parts[1], []):
+            if tool.get("name") != parts[2]:
+                continue
+            ann = tool.get("annotations")
+            get = ann.get if isinstance(ann, dict) else (lambda key: getattr(ann, key, None))
+            return ann is not None and get("readOnlyHint") is True and get("destructiveHint") is not True
+        return False
 
     def resource_identity(self, qualified_name):
         from src.agent_runtime.resources import ExternalResource

@@ -326,7 +326,27 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
             return capabilities
     if tool_name in _BROWSER_MCP_READ_TOOLS:
         return _BROWSER_MCP_READ_CAPABILITIES
+    if tool_name.startswith("mcp__") and _mcp_declares_read_only(tool_name):
+        return _MCP_DECLARED_READ_CAPABILITIES
     return _UNKNOWN_CAPABILITIES
+
+
+# A third-party MCP tool its server explicitly annotates readOnlyHint (and not
+# destructiveHint). Its result is still external, untrusted data.
+_MCP_DECLARED_READ_CAPABILITIES = _capabilities(
+    ToolEffect.READ_PRIVATE,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+
+
+def _mcp_declares_read_only(tool_name: str) -> bool:
+    try:
+        from src.tool_utils import get_mcp_manager
+
+        manager = get_mcp_manager()
+        return bool(manager is not None and manager.declares_read_only(tool_name))
+    except Exception:
+        return False
 
 
 _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(

@@ -580,6 +580,9 @@ async def auto_name_session(session_manager, sess):
             return
 
         owner = getattr(sess, "owner", None)
+        # ChatGPT Subscription bearers are request-local and never persisted,
+        # so the reloaded session has none; resolve them like a chat request.
+        resolve_session_auth(sess, sess.id, owner=owner)
         t_url, t_model, t_headers = resolve_task_endpoint(
             sess.endpoint_url, sess.model, sess.headers, owner=owner
         )

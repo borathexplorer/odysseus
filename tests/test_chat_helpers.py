@@ -531,6 +531,47 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
     assert updates == [("session-1", "Focused Fix")]
 
 
+def test_auto_name_session_resolves_request_local_chatgpt_auth(monkeypatch):
+    """A reloaded ChatGPT Subscription session has no persisted bearer; titling
+    must resolve one like a chat request instead of calling with none (401)."""
+    import routes.chat_helpers as chat_helpers
+    import src.llm_core as llm_core
+    import src.task_endpoint as task_endpoint
+
+    fresh = {"Authorization": "Bearer fresh", "chatgpt-account-id": "acct"}
+    resolved = []
+
+    def fake_resolve_session_auth(sess, session_id, owner=None):
+        resolved.append((session_id, owner))
+        sess.headers = dict(fresh)
+
+    llm_calls = []
+
+    async def fake_llm_call(url, model, messages, **kwargs):
+        llm_calls.append(kwargs["headers"])
+        return "Disk Noise Check"
+
+    monkeypatch.setattr(chat_helpers, "resolve_session_auth", fake_resolve_session_auth)
+    monkeypatch.setattr(task_endpoint, "resolve_task_endpoint",
+                        lambda url, model, headers, owner=None: (url, model, headers))
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call)
+
+    sess = SimpleNamespace(
+        id="session-2", owner="alice",
+        endpoint_url="https://chatgpt.com/backend-api/codex", model="gpt-6.1-sol",
+        headers={},
+        history=[SimpleNamespace(role="user", content="why is my disk noisy?")],
+    )
+    updates = []
+    manager = SimpleNamespace(update_session_name=lambda sid, title: updates.append((sid, title)))
+
+    asyncio.run(auto_name_session(manager, sess))
+
+    assert resolved == [("session-2", "alice")]
+    assert llm_calls == [fresh]
+    assert updates == [("session-2", "Disk Noise Check")]
+
+
 def test_spinoff_detected_from_dict_history():
     sess = SimpleNamespace(history=[
         {"role": "system", "metadata": {"research_spinoff_from": "rp-2"}},

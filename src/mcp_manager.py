@@ -52,7 +52,8 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
 # untrusted input — bound them so an odd or hostile schema cannot distort the prompt.
 _MCP_PARAM_MAX = 12   # max params rendered per tool
 _MCP_TOKEN_MAX = 40   # max chars per rendered name / type token
-_MCP_HINT_MAX = 300   # total-length backstop for the whole hint
+_MCP_ENUM_MAX = 12    # max allowed values rendered per param
+_MCP_HINT_MAX = 500   # total-length backstop for the whole hint
 
 
 def _sanitize_schema_token(value: Any, limit: int = _MCP_TOKEN_MAX) -> str:
@@ -67,6 +68,27 @@ def _sanitize_schema_token(value: Any, limit: int = _MCP_TOKEN_MAX) -> str:
     if len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text
+
+
+def _mcp_enum_values(prop: dict, schema: dict) -> list:
+    """Allowed values of a property: inline `enum`, a `$ref` into `$defs`
+    (Pydantic Literal/Enum), or a single-branch anyOf/allOf wrapper."""
+    for _ in range(4):
+        if isinstance(prop.get("enum"), list):
+            return [v for v in prop["enum"] if isinstance(v, (str, int, float, bool))]
+        ref = prop.get("$ref")
+        if isinstance(ref, str) and ref.startswith(("#/$defs/", "#/definitions/")):
+            section, _, name = ref[2:].partition("/")
+            target = (schema.get(section) or {}).get(name)
+            prop = target if isinstance(target, dict) else {}
+            continue
+        branches = [b for b in (prop.get("anyOf") or prop.get("allOf") or [])
+                    if isinstance(b, dict) and b.get("type") != "null"]
+        if len(branches) == 1:
+            prop = branches[0]
+            continue
+        return []
+    return []
 
 
 def _format_mcp_params(input_schema: Any) -> str:
@@ -90,6 +112,18 @@ def _format_mcp_params(input_schema: Any) -> str:
     parts = []
     for pname, pinfo in list(props.items())[:_MCP_PARAM_MAX]:
         pinfo = pinfo if isinstance(pinfo, dict) else {}
+        allowed = _mcp_enum_values(pinfo, input_schema)
+        if allowed:
+            # Text-route models see only this hint; without the allowed values
+            # they guess, and the server rejects the call.
+            shown = [f'"{_sanitize_schema_token(v)}"' for v in allowed[:_MCP_ENUM_MAX]]
+            if len(allowed) > _MCP_ENUM_MAX:
+                shown.append("…")
+            tag = f'"{_sanitize_schema_token(pname)}": ' + "|".join(shown)
+            if pname in required:
+                tag += " (required)"
+            parts.append(tag)
+            continue
         ptype = pinfo.get("type") or "any"
         if isinstance(ptype, list):
             ptype = "|".join(str(x) for x in ptype)

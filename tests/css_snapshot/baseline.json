@@ -1,5 +1,5 @@
 {
- "digest": "9868d50a542b7ad1",
+ "digest": "743e12a447901ca2",
  "elements": {
   "app-shell": {
    "app-loader": "f04ad5bf6312d53f",
@@ -678,7 +678,7 @@
    "remember-toggle": "87bed84dfe9061e8",
    "root": "6f8529bca11d0e80",
    "setup-note": "028127c742bf5f87",
-   "submit": "5e371dbe68196bfd",
+   "submit": "1ce68ed86d201260",
    "toggle-link": "289ae7be0ef6e564",
    "username": "42f0c35485f59dea",
    "version-label": "cc443cc7790ff3b4"
@@ -750,12 +750,12 @@
    "laptop-light-comfortable": "1e6b6522bcb4a942",
    "laptop-light-compact": "1e6b6522bcb4a942",
    "laptop-light-spacious": "1e6b6522bcb4a942",
-   "phone-dark-comfortable": "e4b7998ae024fdaf",
-   "phone-dark-compact": "e4b7998ae024fdaf",
-   "phone-dark-spacious": "e4b7998ae024fdaf",
-   "phone-light-comfortable": "e4b7998ae024fdaf",
-   "phone-light-compact": "e4b7998ae024fdaf",
-   "phone-light-spacious": "e4b7998ae024fdaf",
+   "phone-dark-comfortable": "102f3de60b38efb7",
+   "phone-dark-compact": "102f3de60b38efb7",
+   "phone-dark-spacious": "102f3de60b38efb7",
+   "phone-light-comfortable": "102f3de60b38efb7",
+   "phone-light-compact": "102f3de60b38efb7",
+   "phone-light-spacious": "102f3de60b38efb7",
    "tablet-dark-comfortable": "321622b649b2f151",
    "tablet-dark-compact": "321622b649b2f151",
    "tablet-dark-spacious": "321622b649b2f151",

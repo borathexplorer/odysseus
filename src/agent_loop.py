@@ -9143,6 +9143,22 @@ def _web_search_unavailable_for_turn(
     return not _looks_like_workspace_coding_request(text)
 
 
+_STREAMED_TOOL_MARKUP_END_RE = re.compile(
+    r"</\s*(?:｜｜DSML｜｜\s*)?(?:tool_calls|invoke|tool_call)\s*>|<｜tool▁call▁end｜>",
+    re.IGNORECASE,
+)
+
+
+def _textual_tool_call_end(text: str) -> Optional[int]:
+    """End offset of the first complete textual tool call, if any."""
+    value = str(text or "")
+    start = _STREAMED_TOOL_MARKUP_START_RE.search(value)
+    if start is None:
+        return None
+    end = _STREAMED_TOOL_MARKUP_END_RE.search(value, start.end())
+    return end.end() if end else None
+
+
 def _streamed_tool_markup_complete(text: str) -> bool:
     """Whether a buffered textual tool call has reached its closing tag."""
     return bool(
@@ -27488,6 +27504,16 @@ async def stream_agent_loop(
                             # following ``t`` arrives corrupts valid output.
                             # Normalize only after the complete round has been
                             # assembled below.
+                            if not _is_api_model:
+                                # A textual call is answered next round; prose
+                                # after it is written before its result exists
+                                # and would otherwise read as a final answer.
+                                _call_end = _textual_tool_call_end(round_response + _delta_text)
+                                if _call_end is not None:
+                                    if _call_end <= len(round_response):
+                                        continue
+                                    _delta_text = (round_response + _delta_text)[len(round_response):_call_end]
+                                    data["delta"] = _delta_text
                             round_response += _delta_text
                             data["delta"] = _delta_text
                             if _is_api_model:

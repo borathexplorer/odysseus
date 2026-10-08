@@ -158,6 +158,9 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # server_id -> set when a connected HTTP server demands a new browser
+        # authorization, so in-flight tool calls stop waiting on it.
+        self._reauth_events: Dict[str, asyncio.Event] = {}
         # Built-in stdio owners keep their AsyncExitStack in the task that
         # entered it. AnyIO cancel scopes must be exited by that same task.
         self._owner_shutdown_events: Dict[str, asyncio.Event] = {}
@@ -371,15 +374,29 @@ class McpManager:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
             from contextlib import AsyncExitStack
-            from src.mcp_oauth import build_provider, clear_auth_url
+            from src.mcp_oauth import allow_interactive_auth, build_provider, clear_auth_url
 
             def _on_redirect(auth_url):
+                if server_id in self._sessions:
+                    # The token stopped working after connect. This URL's flow
+                    # is abandoned (callback_handler fails fast); Reconnect
+                    # starts a fresh one.
+                    self._connections[server_id] = {
+                        "status": "error", "name": name, "transport": "http",
+                        "error": "Authorization expired. Reconnect to sign in again.",
+                    }
+                    event = self._reauth_events.get(server_id)
+                    if event is not None:
+                        event.set()
+                    return
                 # Publish needs_auth the moment the URL is known, independent of
                 # how long discovery/DCR took (may exceed the bounded start wait).
                 self._connections[server_id] = {
                     "status": "needs_auth", "name": name, "transport": "http",
                     "auth_url": auth_url,
                 }
+
+            allow_interactive_auth(server_id, True)
 
             provider = build_provider(server_id, url, on_redirect=_on_redirect)
             stack = AsyncExitStack()
@@ -401,6 +418,8 @@ class McpManager:
             self._register_resource_connection(server_id, session)
             self._stacks[server_id] = stack
             self._tools[server_id] = tools
+            self._reauth_events[server_id] = asyncio.Event()
+            allow_interactive_auth(server_id, False)
             self._connections[server_id] = {
                 "status": "connected", "name": name, "transport": "http",
                 "tool_count": len(tools),
@@ -417,6 +436,9 @@ class McpManager:
             self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
         except Exception as e:
+            from src.mcp_oauth import allow_interactive_auth
+
+            allow_interactive_auth(server_id, False)
             logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
             self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
             return False
@@ -428,9 +450,11 @@ class McpManager:
         task = self._connect_tasks.pop(server_id, None)
         if task is not None and not task.done():
             task.cancel()
+        self._reauth_events.pop(server_id, None)
         try:
-            from src.mcp_oauth import clear_auth_url
+            from src.mcp_oauth import allow_interactive_auth, clear_auth_url
             clear_auth_url(server_id)
+            allow_interactive_auth(server_id, False)
         except Exception:
             pass
 
@@ -599,6 +623,11 @@ class McpManager:
                         ),
                         "exit_code": 1,
                     }
+            reauth = self._reauth_events.get(server_id)
+            if reauth is not None:
+                return await self._call_unless_reauth(
+                    server_id, session, tool_name, arguments, reauth
+                )
             result = await self._do_call(session, tool_name, arguments)
         except Exception as e:
             # Auto-reconnect for builtin servers whose subprocess may have died
@@ -623,6 +652,42 @@ class McpManager:
                 return {"error": str(e), "exit_code": 1}
 
         return result
+
+    async def _call_unless_reauth(
+        self, server_id: str, session, tool_name: str, arguments: Dict, reauth: asyncio.Event
+    ) -> Dict:
+        """Run an HTTP MCP call, but stop as soon as its token is rejected.
+
+        A rejected token makes the SDK start a browser authorization inside the
+        request; nobody is prompted from a chat turn, so the call would hang.
+        """
+        call = asyncio.ensure_future(self._do_call(session, tool_name, arguments))
+        waiter = asyncio.ensure_future(reauth.wait())
+        try:
+            await asyncio.wait({call, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if call.done():
+            return call.result()
+        call.cancel()
+        name = self._connections.get(server_id, {}).get("name") or server_id
+        # The transport fails with the abandoned authorization; drop the
+        # session so later calls report the same instead of hanging.
+        self._sessions.pop(server_id, None)
+        self._reauth_events.pop(server_id, None)
+        self._connections[server_id] = {
+            "status": "error", "name": name, "transport": "http",
+            "error": "Authorization expired. Reconnect to sign in again.",
+        }
+        logger.warning("MCP server %s rejected its token during %s; reauthorization required", server_id, tool_name)
+        return {
+            "error": (
+                f"{name} needs you to sign in again. Open Settings → Integrations → "
+                f"{name} and click Reconnect, then retry."
+            ),
+            "exit_code": 1,
+            "auth_required": True,
+        }
 
     async def _do_call(self, session, tool_name: str, arguments: Dict) -> Dict:
         """Execute a single MCP tool call and return result dict."""

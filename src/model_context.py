@@ -450,6 +450,25 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
                     return int(n_ctx), True
         except Exception:
             pass
+        # Ollama serves its own context length (OLLAMA_CONTEXT_LENGTH, 4096 by
+        # default), not the model's trained window, and silently truncates
+        # longer prompts. /api/ps reports it for loaded models.
+        try:
+            r = httpx.get(f"{base}/api/ps", timeout=REQUEST_TIMEOUT)
+            loaded = r.json().get("models") if r.is_success else None
+            if isinstance(loaded, list):
+                for entry in loaded:
+                    if not isinstance(entry, dict) or model not in (entry.get("name"), entry.get("model")):
+                        continue
+                    n_ctx = entry.get("context_length")
+                    if isinstance(n_ctx, int) and n_ctx > 0:
+                        logger.info(f"Ollama /api/ps reports context_length={n_ctx} for {model}")
+                        return n_ctx, True
+                # Ollama, but the model isn't loaded: its window is the server
+                # setting, which the trained-window table would overstate.
+                return DEFAULT_CONTEXT, False
+        except Exception:
+            pass
 
     # GitHub Copilot's /models requires auth + X-GitHub-Api-Version headers that
     # aren't available here; an unauthenticated probe just 400s. All Copilot

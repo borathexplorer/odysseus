@@ -188,6 +188,13 @@ DEFAULT_CHATGPT_MODEL_CATALOG: dict[str, dict[str, Any]] = {
 
 # Runtime cache of model metadata (updated dynamically whenever models are fetched)
 CHATGPT_MODEL_CATALOG_CACHE: dict[str, dict[str, Any]] = dict(DEFAULT_CHATGPT_MODEL_CATALOG)
+# slug -> context_window reported by the live Codex model catalog.
+CHATGPT_MODEL_CONTEXT_WINDOWS: dict[str, int] = {}
+
+
+def catalog_context_window(slug: str) -> Optional[int]:
+    """Context window the live catalog reported for a subscription model."""
+    return CHATGPT_MODEL_CONTEXT_WINDOWS.get(str(slug or "").strip())
 
 
 def _extract_reasoning_levels(item: dict) -> list[str]:
@@ -266,6 +273,9 @@ def fetch_available_models(access_token: str, timeout: float = 10.0) -> list[str
         visibility = item.get("visibility", "")
         if isinstance(visibility, str) and visibility.strip().lower() in {"hide", "hidden"}:
             continue
+        window = item.get("context_window")
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            CHATGPT_MODEL_CONTEXT_WINDOWS[slug_clean] = window
         levels = _extract_reasoning_levels(item)
         default_lvl = item.get("default_reasoning_level") or item.get("defaultReasoningEffort")
         if levels:

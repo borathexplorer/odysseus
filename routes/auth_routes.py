@@ -14,6 +14,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
+from core.auth_policy import password_auth_enabled, oidc_group_policy, OidcPolicyError
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -91,31 +92,24 @@ class SetOpenRegistrationRequest(BaseModel):
 SESSION_COOKIE = "odysseus_session"
 
 
-def _secure_cookie(request: Request) -> bool:
-    """Decide the ``Secure`` attribute of the session cookie.
+def _session_cookie_secure(request: Request) -> bool:
+    """Secure flag for the password-login session cookie.
 
-    ``SECURE_COOKIES`` stays authoritative when it holds an explicit value:
-    ``true`` always marks the cookie Secure (the documented knob for a TLS
-    proxy), ``false`` never does, which is the escape hatch for an install
-    that still answers on plain HTTP alongside HTTPS. Anything else —
-    unset, or the present-but-empty value docker-compose injects for a
-    variable the host has not defined — derives it from the request, so an
-    HTTPS login gets a Secure cookie without any configuration.
-
-    Either the connection scheme or ``X-Forwarded-Proto`` saying https is
-    enough, which is the same test ``core/middleware.py`` applies before it
-    sends HSTS. Uvicorn's proxy-headers middleware already folds that header
-    into the scheme for the proxies it trusts, so reading it here only adds
-    the case of a terminator that is not on a trusted address; the cost is
-    that a client talking to the app directly can set the header and lock
-    its own session out over plain HTTP.
+    SECURE_COOKIES=true always wins.  Unlike the historical behaviour,
+    SECURE_COOKIES=false (the bundled Compose default) can no longer
+    downgrade the cookie when the request itself arrived over HTTPS —
+    a stock TLS deployment must not issue a bearer cookie eligible for
+    cleartext transmission.  X-Forwarded-Proto is honoured only when the
+    deployment explicitly opts in via TRUST_PROXY_HEADERS, so a client
+    cannot influence cookie policy with a spoofed header.
     """
-    configured = os.getenv("SECURE_COOKIES", "").strip().lower()
-    if configured in ("true", "false"):
-        return configured == "true"
-    # A chained proxy sends a list — the client-facing hop comes first.
-    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0]
-    return request.url.scheme == "https" or forwarded_proto.strip().lower() == "https"
+    if os.getenv("SECURE_COOKIES", "").strip().lower() in ("true", "1", "yes"):
+        return True
+    forwarded = ""
+    if os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in ("true", "1", "yes"):
+        forwarded = getattr(request, "headers", {}).get("x-forwarded-proto", "")
+    scheme = getattr(getattr(request, "url", None), "scheme", "") or "http"
+    return scheme == "https" or forwarded.split(",")[0].strip().lower() == "https"
 
 
 def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
@@ -129,9 +123,22 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         token = request.cookies.get(SESSION_COOKIE)
         return auth_manager.get_username_for_token(token)
 
+    def _require_password_auth():
+        if not password_auth_enabled():
+            raise HTTPException(403, "Password authentication is disabled. Sign in with your identity provider.")
+
+    def _managed_policy(username):
+        if not auth_manager.is_oidc_user(username):
+            return None
+        try:
+            return oidc_group_policy()
+        except OidcPolicyError:
+            raise HTTPException(503, "OIDC access policy is invalid") from None
+
     @router.post("/setup")
     async def first_run_setup(body: SetupRequest, request: Request):
         """Create initial admin account. Only works if no accounts exist."""
+        _require_password_auth()
         if not _setup_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
         if auth_manager.is_configured:
@@ -150,6 +157,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.post("/signup")
     async def signup(body: SignupRequest, request: Request):
         """Create a new user account. Only works if signup is enabled by admin."""
+        _require_password_auth()
         if not _signup_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
         if not auth_manager.is_configured:
@@ -169,6 +177,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.post("/login")
     async def login(body: LoginRequest, request: Request, response: Response):
+        _require_password_auth()
         if not _login_limiter.check(request.client.host):
             raise HTTPException(429, "Too many requests — try again later")
         # Verify password first
@@ -191,7 +200,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             value=token,
             httponly=True,
             samesite="lax",
-            secure=_secure_cookie(request),
+            secure=_session_cookie_secure(request),
             path="/",
         )
         if body.remember:
@@ -211,6 +220,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     async def auth_status(request: Request):
         token = request.cookies.get(SESSION_COOKIE)
         result = auth_manager.status(token)
+        result["password_auth_enabled"] = password_auth_enabled()
+        result["oidc_enabled"] = os.getenv("OIDC_ENABLED", "false").lower() == "true"
         result["signup_enabled"] = auth_manager.signup_enabled
         # Include the caller's effective privileges so the frontend can
         # hide / dim UI controls the user isn't allowed to use. Admins get
@@ -220,6 +231,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             u = result.get("username")
             if u:
                 result["privileges"] = auth_manager.get_privileges(u)
+                result["is_oidc"] = auth_manager.is_oidc_user(u)
         except Exception:
             pass
         return result
@@ -231,9 +243,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.post("/change-password")
     async def change_password(body: ChangePasswordRequest, request: Request):
+        _require_password_auth()
         user = _get_current_user(request)
         if not user:
             raise HTTPException(401, "Not authenticated")
+        if auth_manager.is_oidc_user(user):
+            raise HTTPException(400, "OIDC users don't have a password — manage credentials through your identity provider")
         if len(body.new_password) < PASSWORD_MIN_LENGTH:
             raise HTTPException(400, f"Password must be at least {PASSWORD_MIN_LENGTH} characters")
         current_token = request.cookies.get(SESSION_COOKIE)
@@ -250,9 +265,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.post("/2fa/setup")
     async def totp_setup(request: Request):
         """Generate a TOTP secret and return the QR code URI."""
+        _require_password_auth()
         user = _get_current_user(request)
         if not user:
             raise HTTPException(401, "Not authenticated")
+        if auth_manager.is_oidc_user(user):
+            raise HTTPException(400, "Two-factor authentication is managed by your identity provider for OIDC users")
         if auth_manager.totp_enabled(user):
             raise HTTPException(400, "2FA is already enabled")
         secret = auth_manager.totp_generate_secret(user)
@@ -273,9 +291,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.post("/2fa/confirm")
     async def totp_confirm(body: TotpVerifyRequest, request: Request):
         """Verify a TOTP code to confirm 2FA setup. Returns backup codes."""
+        _require_password_auth()
         user = _get_current_user(request)
         if not user:
             raise HTTPException(401, "Not authenticated")
+        if auth_manager.is_oidc_user(user):
+            raise HTTPException(400, "Two-factor authentication is managed by your identity provider for OIDC users")
         if not auth_manager.totp_confirm_enable(user, body.code):
             raise HTTPException(400, "Invalid code — try again")
         backup = auth_manager.users.get(user, {}).get("totp_backup_codes", [])
@@ -287,9 +308,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.post("/2fa/disable")
     async def totp_disable(body: TotpDisableRequest, request: Request):
         """Disable 2FA. Requires password confirmation."""
+        _require_password_auth()
         user = _get_current_user(request)
         if not user:
             raise HTTPException(401, "Not authenticated")
+        if auth_manager.is_oidc_user(user):
+            raise HTTPException(400, "Two-factor authentication is managed by your identity provider for OIDC users")
         if not auth_manager.totp_disable(user, body.password):
             raise HTTPException(400, "Invalid password")
         return {"ok": True}
@@ -308,10 +332,17 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
-        return {"users": auth_manager.list_users()}
+        users = auth_manager.list_users()
+        for entry in users:
+            policy = _managed_policy(entry["username"])
+            if policy:
+                entry["oidc_managed_admin"] = bool(policy.admin_groups)
+                entry["oidc_managed_privileges"] = sorted(policy.privilege_groups)
+        return {"users": users, "password_auth_enabled": password_auth_enabled()}
 
     @router.post("/users")
     async def admin_create_user(body: CreateUserRequest, request: Request):
+        _require_password_auth()
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
@@ -328,6 +359,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.put("/users/{username}/password")
     async def reset_user_password(username: str, body: ResetUserPasswordRequest, request: Request):
+        _require_password_auth()
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
@@ -346,6 +378,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
         body = await request.json()
+        policy = _managed_policy(username)
+        if policy and isinstance(body, dict) and set(body) & set(policy.privilege_groups):
+            raise HTTPException(409, "These permissions are managed by the identity provider")
         ok = auth_manager.set_privileges(username, body)
         if not ok:
             raise HTTPException(404, "User not found or is admin")
@@ -637,6 +672,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
+        policy = _managed_policy(username)
+        if policy and policy.admin_groups:
+            raise HTTPException(409, "Administrator access is managed by the identity provider")
         result = auth_manager.set_admin(username, body.is_admin, user)
         if result is SetAdminResult.USER_NOT_FOUND:
             raise HTTPException(404, "User not found")
@@ -661,6 +699,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
         This endpoint is kept for backward compatibility and may be removed in future versions.
         """
+        _require_password_auth()
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")
@@ -670,6 +709,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     @router.put("/open-signup")
     async def set_signup_enabled(body: SetOpenRegistrationRequest, request: Request):
         """Set open signup enabled state. Admin only."""
+        _require_password_auth()
         user = _get_current_user(request)
         if not user or not auth_manager.is_admin(user):
             raise HTTPException(403, "Admin only")

@@ -58,7 +58,9 @@ def store_transaction(path_factory):
     return decorate
 
 
-def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None) -> None:
+def atomic_write_json(
+    path: str, data: Any, *, indent: Optional[int] = None, mode: Optional[int] = None
+) -> None:
     """Atomically persist `data` as JSON at `path`.
 
     The temp file uses a random suffix so two concurrent writers saving the
@@ -66,12 +68,18 @@ def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None) -> 
     this: the PID is constant for the life of a process, so two writers on
     the same path within one process (or one single-process container, where
     the PID never changes at all) still race for the same temp file.
+    When mode is given, restrict the temporary file before writing secret data.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{uuid.uuid4().hex}"
 
     try:
         with open(tmp, "w", encoding="utf-8") as f:
+            if mode is not None:
+                try:
+                    os.fchmod(f.fileno(), mode)
+                except AttributeError:  # Windows
+                    os.chmod(tmp, mode)
             json.dump(data, f, indent=indent)
             f.flush()
             os.fsync(f.fileno())

@@ -19,6 +19,7 @@ from src.constants import (
     RAG_DIR, MEMORY_VECTORS_DIR, AGENT_WORKSPACE_DIR, PASSWORD_MIN_LENGTH,
 )
 from core.auth import RESERVED_USERNAMES
+from core.auth_policy import password_auth_enabled, validate_auth_policy
 
 DIRS = [
     DATA_DIR,
@@ -89,6 +90,10 @@ def _prompt_admin_credentials():
 
 def create_default_admin():
     """Create an initial admin user if none exists."""
+    validate_auth_policy()
+    if not password_auth_enabled():
+        print("  [skip] Password authentication disabled; use the identity provider")
+        return "oidc"
     auth_path = AUTH_FILE
     if os.path.exists(auth_path):
         print("  [skip] auth.json already exists")
@@ -290,6 +295,8 @@ def main():
     # Cleaned, action-focused final instruction strings
     if admin_status == "created":
         print("Login with your admin credentials.\n")
+    elif admin_status == "oidc":
+        print("Sign in through your configured identity provider.\n")
     elif admin_status == "exists":
         print("Login with your existing admin credentials.\n")
     elif admin_status == "skipped":

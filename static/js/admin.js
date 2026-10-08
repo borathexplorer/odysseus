@@ -86,13 +86,14 @@ async function loadUsers() {
           <div style="width:28px;height:28px;border-radius:50%;background:color-mix(in srgb, var(--accent) 20%, var(--panel));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;color:var(--accent);">${esc(initial)}</div>
           <div>
             <span class="admin-user-name">${esc(u.username)}</span>
+            ${u.oidc ? '<span class="admin-badge" title="Signs in through an identity provider">SSO</span>' : ''}
             ${u.is_admin ? '<span class="admin-badge" style="margin-left:6px;">ADMIN</span>' : '<span style="font-size:10px;opacity:0.4;display:block;">Click to manage privileges</span>'}
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button class="admin-btn-sm" data-adm-toggle-admin="${esc(u.username)}" data-make-admin="${u.is_admin ? '0' : '1'}" style="font-size:11px;">${u.is_admin ? 'Revoke admin' : 'Make admin'}</button>
+          <button class="admin-btn-sm" data-adm-toggle-admin="${esc(u.username)}" data-make-admin="${u.is_admin ? '0' : '1'}" ${u.oidc_managed_admin ? 'disabled title="Managed by your identity provider"' : ''} style="font-size:11px;">${u.oidc_managed_admin ? 'SSO-managed role' : (u.is_admin ? 'Revoke admin' : 'Make admin')}</button>
           <button class="admin-btn-sm" data-adm-rename-user="${esc(u.username)}" style="font-size:11px;">Rename</button>
-          ${u.is_admin ? '' : '<button class="admin-btn-sm" data-adm-reset-password style="font-size:11px;">Change password</button>'}
+          ${u.is_admin || u.oidc || data.password_auth_enabled === false ? '' : '<button class="admin-btn-sm" data-adm-reset-password style="font-size:11px;">Change password</button>'}
           ${u.is_admin ? '' : `<button class="admin-btn-delete" data-adm-del-user="${esc(u.username)}" style="font-size:11px;">Remove</button>`}
           ${u.is_admin ? '' : '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>'}
         </div>
@@ -109,9 +110,10 @@ async function loadUsers() {
         let html = '<div style="font-size:10px;text-transform:uppercase;letter-spacing:0.5px;opacity:0.35;font-weight:600;margin-bottom:4px;">Features</div>';
         for (const [key, label] of Object.entries(PRIV_LABELS)) {
           const checked = u.privileges && u.privileges[key] ? 'checked' : '';
+          const managed = (u.oidc_managed_privileges || []).includes(key);
           html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;">
-            <span style="font-size:12px;">${label}</span>
-            <label class="admin-switch" style="transform:scale(0.85);"><input type="checkbox" data-priv="${key}" data-user="${esc(u.username)}" ${checked}><span class="admin-slider"></span></label>
+            <span style="font-size:12px;">${label}${managed ? ' <small title="Managed by your identity provider">(SSO)</small>' : ''}</span>
+            <label class="admin-switch" style="transform:scale(0.85);"><input type="checkbox" data-priv="${key}" data-user="${esc(u.username)}" ${checked} ${managed ? 'disabled aria-label="Managed by your identity provider"' : ''}><span class="admin-slider"></span></label>
           </div>`;
         }
         // Rate limit
@@ -175,12 +177,13 @@ async function loadUsers() {
             else if (input.type === 'number') value = parseInt(input.value) || 0;
             else value = input.value;
             try {
-              await fetch(`/api/auth/users/${encodeURIComponent(username)}/privileges`, {
+              const response = await fetch(`/api/auth/users/${encodeURIComponent(username)}/privileges`, {
                 method: 'PUT', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ [key]: value }),
               });
-            } catch (e) { uiModule.showError('Failed to update privilege'); }
+              if (!response.ok) throw new Error('Permission update rejected');
+            } catch (e) { uiModule.showError('Failed to update privilege'); loadUsers(); }
           };
           if (input.type === 'checkbox') input.addEventListener('change', handler);
           else input.addEventListener('change', handler);
@@ -390,7 +393,11 @@ function initSignupToggle() {
   const toggle = el('adm-signupToggle');
   fetch('/api/auth/status', { credentials: 'same-origin' })
     .then(r => r.json())
-    .then(d => { toggle.checked = !!d.signup_enabled; })
+    .then(d => {
+      toggle.checked = !!d.signup_enabled;
+      toggle.disabled = d.password_auth_enabled === false;
+      if (toggle.disabled) toggle.title = 'Password authentication is disabled';
+    })
     .catch(e => console.warn('Auth status fetch failed:', e));
   toggle.addEventListener('change', async () => {
     try {
@@ -432,6 +439,9 @@ function initAddUser() {
       if (!policy) return;
       _authPolicy = policy;
       const admPw = el('adm-newPassword');
+      if (admPw && policy.password_auth_enabled === false) {
+        admPw.closest('.admin-card').style.display = 'none';
+      }
       if (admPw) admPw.placeholder = `Password (min ${policy.password_min_length})`;
     })
     .catch(() => {});

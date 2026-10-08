@@ -1553,6 +1553,13 @@ function initAccount() {
         const initial = (d.username || '?')[0].toUpperCase();
         avatarEl.textContent = initial;
       }
+      // OIDC users don't have a password — hide password change and 2FA.
+      if (d.is_oidc || d.password_auth_enabled === false) {
+        const pwCard = document.getElementById('settings-pw-card');
+        const tfaCard = document.getElementById('settings-2fa-card');
+        if (pwCard) pwCard.style.display = 'none';
+        if (tfaCard) tfaCard.style.display = 'none';
+      }
     }).catch(() => {});
 
   // Update password placeholder and policy from server

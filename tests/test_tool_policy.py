@@ -44,7 +44,29 @@ def _delta_chunk(text):
     return "data: " + json.dumps({"delta": text}) + "\n\n"
 
 
+class _NoSkillsManager:
+    def __init__(self, _data_dir):
+        pass
+
+    def load(self, owner=None):
+        return []
+
+    def index_for(self, owner=None, active_toolsets=None):
+        return []
+
+    def get_relevant_skills(self, *args, **kwargs):
+        return []
+
+    def record_use(self, name, owner=None):
+        pass
+
+
 def _patch_loop_basics(monkeypatch):
+    # Whether real skills load depends on test order; when they do, their
+    # untrusted catalog taints the run and gates network tools behind approval.
+    no_skills = type(sys)("services.memory.skills")
+    no_skills.SkillsManager = _NoSkillsManager
+    monkeypatch.setitem(sys.modules, "services.memory.skills", no_skills)
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)

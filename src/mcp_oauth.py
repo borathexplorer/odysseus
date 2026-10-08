@@ -49,6 +49,26 @@ AUTH_WAIT_SECONDS = 300
 _pending: Dict[str, asyncio.Future] = {}   # state -> Future[(code, state)]
 _pending_ts: Dict[str, float] = {}         # state -> monotonic timestamp, for pruning
 _auth_urls: Dict[str, str] = {}            # server_id -> authorization URL
+# Servers whose connect may wait for a browser authorization. A connected
+# server that loses its token mid tool call is not in this set: waiting there
+# would hold the provider's auth lock and the chat turn for AUTH_WAIT_SECONDS
+# with nobody prompted to sign in.
+_interactive: set = set()
+
+
+class McpReauthRequired(Exception):
+    """A connected server needs the user to authorize again."""
+
+    def __init__(self, server_id: str):
+        super().__init__(f"MCP server {server_id} needs to be authorized again")
+        self.server_id = server_id
+
+
+def allow_interactive_auth(server_id: str, allowed: bool) -> None:
+    if allowed:
+        _interactive.add(server_id)
+    else:
+        _interactive.discard(server_id)
 
 
 def _prune_stale() -> None:
@@ -142,6 +162,18 @@ class DbTokenStorage:
 
     async def set_tokens(self, tokens) -> None:
         self._update("tokens", json.loads(tokens.model_dump_json()))
+        # expires_in is relative; keep when it started so a restarted process
+        # still knows when to refresh (see _PersistentExpiryProvider).
+        self._update("tokens_obtained_at", {"epoch": time.time()})
+
+    def token_expiry_time(self) -> Optional[float]:
+        data = self._load()
+        tokens = data.get("tokens") or {}
+        obtained = (data.get("tokens_obtained_at") or {}).get("epoch")
+        try:
+            return float(obtained) + float(tokens["expires_in"])
+        except (KeyError, TypeError, ValueError):
+            return None
 
     async def get_client_info(self):
         from mcp.shared.auth import OAuthClientInformationFull
@@ -192,6 +224,10 @@ def build_provider(server_id: str, url: str, on_redirect=None):
     async def callback_handler() -> Tuple[str, Optional[str]]:
         auth_url = _auth_urls.get(server_id)
         state = (parse_qs(urlparse(auth_url).query).get("state") or [None])[0] if auth_url else None
+        if server_id not in _interactive:
+            _discard_pending(state)
+            _auth_urls.pop(server_id, None)
+            raise McpReauthRequired(server_id)
         fut = _pending.get(state)
         if fut is None:
             raise RuntimeError("No pending OAuth flow for this server")
@@ -202,7 +238,17 @@ def build_provider(server_id: str, url: str, on_redirect=None):
             _discard_pending(state)
             _auth_urls.pop(server_id, None)
 
-    return OAuthClientProvider(
+    class _PersistentExpiryProvider(OAuthClientProvider):
+        # The SDK refreshes before a request only when it knows the expiry,
+        # which it keeps in memory alone; a 401 skips refresh and starts a new
+        # browser authorization. Restore the stored expiry on load.
+        async def _initialize(self) -> None:
+            await super()._initialize()
+            expiry_reader = getattr(self.context.storage, "token_expiry_time", None)
+            if self.context.current_tokens is not None and expiry_reader is not None:
+                self.context.token_expiry_time = expiry_reader()
+
+    return _PersistentExpiryProvider(
         server_url=url,
         client_metadata=client_metadata,
         storage=DbTokenStorage(server_id),

@@ -246,6 +246,15 @@ _context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
 def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Return (context_length, known). ``known`` is False only when the value is a
     bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table)."""
+    # The ChatGPT Subscription catalog reports each model's window; it is read
+    # before the cache below, which may hold an "unknown" from before the
+    # catalog was fetched.
+    from src.chatgpt_subscription import catalog_context_window, is_chatgpt_subscription_base
+
+    if is_chatgpt_subscription_base(endpoint_url):
+        window = catalog_context_window(model)
+        if window:
+            return window, True
     configured_kind = _configured_endpoint_kind(endpoint_url)
     is_local = is_local_endpoint(endpoint_url)
     # Key on (endpoint_url, model): the same model id can be served by two

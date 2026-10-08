@@ -24112,9 +24112,14 @@ async def stream_agent_loop(
             headers=candidate_headers,
             endpoint_id=(route_descriptor or {}).get("endpoint_id"),
         )
+        # The ChatGPT Subscription request builder discards native tool
+        # schemas, so model-name and endpoint hints must not select them.
+        from src.chatgpt_subscription import is_chatgpt_subscription_base
+
         textual_tools = (
             force_textual_tool_transport
             or force_textual_tools
+            or is_chatgpt_subscription_base(candidate_url)
             or _native_tools_temporarily_disabled(candidate_url, candidate_model)
         )
         if textual_tools:
@@ -24131,10 +24136,11 @@ async def stream_agent_loop(
             is_api = True
         if tool_surface in {"compact", "full"}:
             is_api = True
-        prompt_compact = (
-            tool_surface != "full"
-            and (is_api or is_native_ollama or is_ollama_compat)
-        )
+        # The compact prompt says "use only the native tool schemas; do not
+        # write tool syntax in chat". Ollama routes only receive schemas when
+        # is_api (endpoint supports_tools=true); otherwise they are textual and
+        # need the full prompt that teaches the textual call format.
+        prompt_compact = tool_surface != "full" and is_api
         if tool_surface == "compact":
             # Retrieval text is intentionally shortened for indexing and can
             # omit the output path that defines an artifact contract. Routing
@@ -24328,6 +24334,28 @@ async def stream_agent_loop(
                 _last_user[:160],
             )
             route_messages.append({"role": "user", "content": _last_user})
+        # Text-transport routes (e.g. ChatGPT subscription, Ollama without
+        # native tools) receive no MCP schemas. Their only MCP mention was the
+        # untrusted description catalog, which forbids acting on its content,
+        # so models reported user MCP tools as unavailable. State the offered
+        # names and a call format the parser accepts as a trusted directive;
+        # descriptions stay in the untrusted catalog.
+        if not is_api and route_mcp_schemas and tool_surface != "none":
+            _textual_mcp_names = sorted(
+                name for schema in route_mcp_schemas
+                if (name := (schema.get("function") or {}).get("name"))
+                and (prompt_route_tools is None or name in prompt_route_tools)
+                and name not in disabled_tools
+            )
+            if _textual_mcp_names:
+                _textual_mcp_lines = [
+                    "MCP tools available this turn (descriptions are in the MCP tools reference "
+                    "data). To call one, reply with exactly one block of the form",
+                    '<tool_call>{"name": "TOOL_NAME", "arguments": {...}}</tool_call>',
+                    "using the full tool name below, then wait for its result before continuing.",
+                ]
+                _textual_mcp_lines.extend(f"- {name}" for name in _textual_mcp_names)
+                _prepend_agent_directive(route_messages, "\n".join(_textual_mcp_lines))
         if textual_tools and normalized_external_tool_schemas:
             contract_lines = [
                 "Environment tools declared for this turn follow. A tool-call response MUST contain exactly",

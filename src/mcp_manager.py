@@ -805,7 +805,7 @@ class McpManager:
         if not tools:
             return ""
 
-        lines = ["\n\nYou also have access to external MCP tool servers. These tools are called via native function calling:"]
+        lines = ["\n\nYou also have access to external MCP tool servers. Their tools:"]
         by_server = {}
         for t in tools:
             # Skip builtin Python servers that are already in the agent prompt.
